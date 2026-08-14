@@ -256,6 +256,44 @@ app.post('/broadcast', async (req, res) => {
   res.json({ total: chatIds.length, sent, failed });
 });
 
+// ---------- Kunlik eslatma yuborish logikasi (cron va qo'lda test uchun umumiy) ----------
+async function runDailyReminder(){
+  const today = todayInTashkent();
+  const targets = Object.keys(users).filter((chatId) => checkins[chatId] !== today);
+  console.log(`[Eslatma] ${targets.length} ta foydalanuvchiga yuborilmoqda...`);
+  let sent = 0;
+  let failed = 0;
+  for (const chatId of targets) {
+    try {
+      await bot.sendMessage(chatId, reminderText, {
+        reply_markup: {
+          inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
+        },
+      });
+      sent++;
+    } catch (e) {
+      failed++;
+      if (e.response && e.response.statusCode === 403) {
+        delete users[chatId];
+      }
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  saveUsers(users);
+  return { totalUsers: Object.keys(users).length, targeted: targets.length, sent, failed };
+}
+
+// Sinov uchun: eslatmani hoziroq, vaqtni kutmasdan ishga tushirish
+// POST /trigger-reminder  { "secret": "..." }
+app.post('/trigger-reminder', async (req, res) => {
+  const { secret } = req.body || {};
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  const result = await runDailyReminder();
+  res.json(result);
+});
+
 app.listen(PORT, () => {
   console.log(`Kitobxon bot serveri ${PORT}-portda ishga tushdi.`);
 });
@@ -265,26 +303,7 @@ app.listen(PORT, () => {
 // o'sha kuni hali check-in qilmagan (o'qimagan) foydalanuvchilarga yuboradi.
 if (REMINDER_ENABLED) {
   const cronExpr = `0 ${REMINDER_HOUR} * * *`;
-  cron.schedule(cronExpr, async () => {
-    const today = todayInTashkent();
-    const targets = Object.keys(users).filter((chatId) => checkins[chatId] !== today);
-    console.log(`[Eslatma] ${targets.length} ta foydalanuvchiga yuborilmoqda...`);
-    for (const chatId of targets) {
-      try {
-        await bot.sendMessage(chatId, reminderText, {
-          reply_markup: {
-            inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
-          },
-        });
-      } catch (e) {
-        if (e.response && e.response.statusCode === 403) {
-          delete users[chatId];
-        }
-      }
-      await new Promise((r) => setTimeout(r, 40));
-    }
-    saveUsers(users);
-  }, { timezone: TIMEZONE });
+  cron.schedule(cronExpr, runDailyReminder, { timezone: TIMEZONE });
   console.log(`Avtomatik eslatma yoqilgan: har kuni soat ${REMINDER_HOUR}:00 (${TIMEZONE})`);
 } else {
   console.log('Avtomatik eslatma o\'chirilgan (REMINDER_ENABLED=false).');
