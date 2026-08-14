@@ -1,6 +1,7 @@
 // Kitobxon Telegram Bot — foydalanuvchilarni saqlaydi va e'lon yuborish imkonini beradi
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
+const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,7 +9,12 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const MINI_APP_URL = process.env.MINI_APP_URL || 'https://kitobxonn.netlify.app/';
 const PORT = process.env.PORT || 3000;
+const REMINDER_HOUR = parseInt(process.env.REMINDER_HOUR || '20', 10); // 24 soatlik format, Toshkent vaqti
+const REMINDER_ENABLED = process.env.REMINDER_ENABLED !== 'false';
+const TIMEZONE = 'Asia/Tashkent';
 const USERS_FILE = path.join(__dirname, 'users.json');
+const REMINDER_FILE = path.join(__dirname, 'reminder.json');
+const CHECKINS_FILE = path.join(__dirname, 'checkins.json');
 
 if (!BOT_TOKEN) {
   console.error('XATO: BOT_TOKEN muhit o\'zgaruvchisi topilmadi. Render sozlamalarida qo\'shing.');
@@ -40,6 +46,56 @@ function saveUsers(users) {
 }
 
 let users = loadUsers();
+
+// ---------- Eslatma matnini saqlash ----------
+const DEFAULT_REMINDER = "Salom! Bugun hali kitob o'qimadingiz shekilli 📖 Bir necha bet o'qib, streak'ingizni saqlab qoling!";
+
+function loadReminderText() {
+  try {
+    if (fs.existsSync(REMINDER_FILE)) {
+      return JSON.parse(fs.readFileSync(REMINDER_FILE, 'utf8')).text;
+    }
+  } catch (e) {
+    console.error('Eslatma matnini o\'qishda xato:', e);
+  }
+  return DEFAULT_REMINDER;
+}
+
+function saveReminderText(text) {
+  try {
+    fs.writeFileSync(REMINDER_FILE, JSON.stringify({ text }, null, 2));
+  } catch (e) {
+    console.error('Eslatma matnini saqlashda xato:', e);
+  }
+}
+
+let reminderText = loadReminderText();
+
+// ---------- Kim bugun o'qidi (check-in) ----------
+function loadCheckins() {
+  try {
+    if (fs.existsSync(CHECKINS_FILE)) {
+      return JSON.parse(fs.readFileSync(CHECKINS_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Check-in ma\'lumotlarini o\'qishda xato:', e);
+  }
+  return {};
+}
+
+function saveCheckins(checkins) {
+  try {
+    fs.writeFileSync(CHECKINS_FILE, JSON.stringify(checkins, null, 2));
+  } catch (e) {
+    console.error('Check-in ma\'lumotlarini saqlashda xato:', e);
+  }
+}
+
+let checkins = loadCheckins(); // { chatId: 'YYYY-MM-DD' — oxirgi o'qigan sana }
+
+function todayInTashkent() {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: TIMEZONE }); // YYYY-MM-DD
+}
 
 // ---------- Bot (polling rejimida) ----------
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -93,6 +149,76 @@ app.get('/', (req, res) => {
   res.send(`Kitobxon bot ishlab turibdi. Ro'yxatdagi foydalanuvchilar: ${Object.keys(users).length}`);
 });
 
+// Ro'yxatdagi foydalanuvchilarni olish: GET /users?secret=...
+app.get('/users', (req, res) => {
+  const { secret } = req.query;
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  const list = Object.values(users).map(u => ({
+    chatId: u.chatId,
+    username: u.username,
+    firstName: u.firstName,
+    joinedAt: u.joinedAt,
+  }));
+  res.json({ users: list });
+});
+
+// Bitta foydalanuvchiga xabar: POST /send  { "secret": "...", "chatId": "...", "message": "..." }
+app.post('/send', async (req, res) => {
+  const { secret, chatId, message } = req.body || {};
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  if (!chatId || !message) {
+    return res.status(400).json({ error: '"chatId" va "message" maydonlari kerak' });
+  }
+  try {
+    await bot.sendMessage(chatId, message, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
+      },
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Yuborishda xato' });
+  }
+});
+
+// Ilova tomonidan chaqiriladi: foydalanuvchi bugungi maqsadga yetganda
+// POST /checkin  { "chatId": "..." }  — maxfiy kalit talab qilinmaydi (foydalanuvchining o'zi haqida signal)
+app.post('/checkin', (req, res) => {
+  const { chatId } = req.body || {};
+  if (!chatId) {
+    return res.status(400).json({ error: '"chatId" maydoni kerak' });
+  }
+  checkins[String(chatId)] = todayInTashkent();
+  saveCheckins(checkins);
+  res.json({ ok: true });
+});
+
+// Eslatma matnini ko'rish/o'zgartirish: GET/POST /reminder-settings
+app.get('/reminder-settings', (req, res) => {
+  const { secret } = req.query;
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  res.json({ text: reminderText, hour: REMINDER_HOUR, enabled: REMINDER_ENABLED, timezone: TIMEZONE });
+});
+
+app.post('/reminder-settings', (req, res) => {
+  const { secret, text } = req.body || {};
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: '"text" maydoni kerak' });
+  }
+  reminderText = text;
+  saveReminderText(text);
+  res.json({ ok: true, text: reminderText });
+});
+
 // E'lon yuborish: POST /broadcast  { "secret": "...", "message": "..." }
 app.post('/broadcast', async (req, res) => {
   const { secret, message } = req.body || {};
@@ -133,3 +259,33 @@ app.post('/broadcast', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Kitobxon bot serveri ${PORT}-portda ishga tushdi.`);
 });
+
+// ---------- Avtomatik kunlik eslatma ----------
+// Har kuni REMINDER_HOUR'da (Toshkent vaqti) ishga tushadi va faqat
+// o'sha kuni hali check-in qilmagan (o'qimagan) foydalanuvchilarga yuboradi.
+if (REMINDER_ENABLED) {
+  const cronExpr = `0 ${REMINDER_HOUR} * * *`;
+  cron.schedule(cronExpr, async () => {
+    const today = todayInTashkent();
+    const targets = Object.keys(users).filter((chatId) => checkins[chatId] !== today);
+    console.log(`[Eslatma] ${targets.length} ta foydalanuvchiga yuborilmoqda...`);
+    for (const chatId of targets) {
+      try {
+        await bot.sendMessage(chatId, reminderText, {
+          reply_markup: {
+            inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
+          },
+        });
+      } catch (e) {
+        if (e.response && e.response.statusCode === 403) {
+          delete users[chatId];
+        }
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    saveUsers(users);
+  }, { timezone: TIMEZONE });
+  console.log(`Avtomatik eslatma yoqilgan: har kuni soat ${REMINDER_HOUR}:00 (${TIMEZONE})`);
+} else {
+  console.log('Avtomatik eslatma o\'chirilgan (REMINDER_ENABLED=false).');
+}
