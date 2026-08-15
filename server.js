@@ -177,7 +177,7 @@ bot.on('message', (msg) => {
 
 // ---------- Admin uchun HTTP API (e'lon yuborish) ----------
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -205,21 +205,50 @@ app.get('/users', (req, res) => {
   res.json({ users: list });
 });
 
-// Bitta foydalanuvchiga xabar: POST /send  { "secret": "...", "chatId": "...", "message": "..." }
+// ---------- Turli xabar turlarini yuborish (matn / rasm / video / so'rovnoma) ----------
+// payload.type: 'text' | 'photo' | 'video' | 'poll'
+// text: { message }
+// photo/video: { caption, mediaUrl } yoki { caption, fileData(base64) }
+// poll: { question, options: [...] }
+async function sendContent(chatId, payload) {
+  const kb = {
+    reply_markup: {
+      inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
+    },
+  };
+  const type = payload.type || 'text';
+
+  if (type === 'photo' || type === 'video') {
+    const source = payload.fileData ? Buffer.from(payload.fileData, 'base64') : payload.mediaUrl;
+    if (!source) throw new Error('Rasm/video manbasi topilmadi (fayl yoki URL kerak)');
+    const opts = { caption: payload.caption || '', ...kb };
+    return type === 'photo' ? bot.sendPhoto(chatId, source, opts) : bot.sendVideo(chatId, source, opts);
+  }
+
+  if (type === 'poll') {
+    const options = (payload.options || []).map((o) => String(o).trim()).filter(Boolean);
+    if (!payload.question || options.length < 2) {
+      throw new Error('So\'rovnoma uchun savol va kamida 2 ta variant kerak');
+    }
+    return bot.sendPoll(chatId, payload.question, options, { is_anonymous: true });
+  }
+
+  // default: text
+  if (!payload.message) throw new Error('"message" maydoni kerak');
+  return bot.sendMessage(chatId, payload.message, kb);
+}
+
+// Bitta foydalanuvchiga xabar: POST /send  { "secret": "...", "chatId": "...", ...payload }
 app.post('/send', async (req, res) => {
-  const { secret, chatId, message } = req.body || {};
+  const { secret, chatId, ...payload } = req.body || {};
   if (secret !== ADMIN_SECRET) {
     return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
   }
-  if (!chatId || !message) {
-    return res.status(400).json({ error: '"chatId" va "message" maydonlari kerak' });
+  if (!chatId) {
+    return res.status(400).json({ error: '"chatId" maydoni kerak' });
   }
   try {
-    await bot.sendMessage(chatId, message, {
-      reply_markup: {
-        inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
-      },
-    });
+    await sendContent(chatId, payload);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Yuborishda xato' });
@@ -260,14 +289,11 @@ app.post('/reminder-settings', (req, res) => {
   res.json({ ok: true, text: reminderText });
 });
 
-// E'lon yuborish: POST /broadcast  { "secret": "...", "message": "..." }
+// E'lon yuborish: POST /broadcast  { "secret": "...", ...payload }
 app.post('/broadcast', async (req, res) => {
-  const { secret, message } = req.body || {};
+  const { secret, ...payload } = req.body || {};
   if (secret !== ADMIN_SECRET) {
     return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
-  }
-  if (!message || typeof message !== 'string') {
-    return res.status(400).json({ error: '"message" maydoni kerak' });
   }
 
   const chatIds = Object.keys(users);
@@ -276,11 +302,7 @@ app.post('/broadcast', async (req, res) => {
 
   for (const chatId of chatIds) {
     try {
-      await bot.sendMessage(chatId, message, {
-        reply_markup: {
-          inline_keyboard: [[{ text: '📖 Kitobxonni ochish', web_app: { url: MINI_APP_URL } }]],
-        },
-      });
+      await sendContent(chatId, payload);
       sent++;
     } catch (e) {
       failed++;
