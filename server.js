@@ -11,6 +11,7 @@ const MINI_APP_URL = process.env.MINI_APP_URL || 'https://kitobxonn.netlify.app/
 const PORT = process.env.PORT || 3000;
 const REMINDER_HOUR = parseInt(process.env.REMINDER_HOUR || '20', 10); // 24 soatlik format, Toshkent vaqti
 const REMINDER_ENABLED = process.env.REMINDER_ENABLED !== 'false';
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || null;
 const TIMEZONE = 'Asia/Tashkent';
 const USERS_FILE = path.join(__dirname, 'users.json');
 const REMINDER_FILE = path.join(__dirname, 'reminder.json');
@@ -134,6 +135,30 @@ bot.onText(/\/stop/, (msg) => {
   bot.sendMessage(chatId, "Obuna bekor qilindi. Xabarlar endi yuborilmaydi. Qaytadan yoqish uchun /start yozing.");
 });
 
+// ---------- Fikr-mulohaza: buyruq bo'lmagan har qanday xabarni adminga uzatish ----------
+bot.on('message', (msg) => {
+  const text = msg.text;
+  if (!text || text.startsWith('/')) return; // buyruqlarni bu yerda ishlamaymiz (yuqorida alohida ishlanadi)
+
+  const chatId = msg.chat.id;
+
+  // Foydalanuvchiga tasdiq
+  bot.sendMessage(chatId, "Rahmat! Fikringiz yetkazildi 🙏");
+
+  // Adminga uzatish
+  if (ADMIN_CHAT_ID) {
+    const from = msg.from;
+    const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ');
+    const usernamePart = from.username ? ` (@${from.username})` : '';
+    bot.sendMessage(
+      ADMIN_CHAT_ID,
+      `📩 Yangi fikr/xabar\n👤 ${fullName}${usernamePart}\n🆔 chatId: ${chatId}\n\n${text}`
+    ).catch((e) => console.error('Adminga yuborishda xato:', e.message));
+  } else {
+    console.log('ADMIN_CHAT_ID sozlanmagan — fikr faqat logga yozildi:', chatId, text);
+  }
+});
+
 // ---------- Admin uchun HTTP API (e'lon yuborish) ----------
 const app = express();
 app.use(express.json());
@@ -243,12 +268,10 @@ app.post('/broadcast', async (req, res) => {
       sent++;
     } catch (e) {
       failed++;
-      // Agar foydalanuvchi botni bloklagan bo'lsa, ro'yxatdan o'chiramiz
       if (e.response && (e.response.statusCode === 403)) {
         delete users[chatId];
       }
     }
-    // Telegram tezlik cheklovidan qochish uchun kichik pauza
     await new Promise((r) => setTimeout(r, 40));
   }
   saveUsers(users);
