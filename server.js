@@ -136,23 +136,39 @@ bot.onText(/\/stop/, (msg) => {
 });
 
 // ---------- Fikr-mulohaza: buyruq bo'lmagan har qanday xabarni adminga uzatish ----------
+// va admin javob (reply) yozsa, uni tegishli foydalanuvchiga qaytarish
 bot.on('message', (msg) => {
   const text = msg.text;
   if (!text || text.startsWith('/')) return; // buyruqlarni bu yerda ishlamaymiz (yuqorida alohida ishlanadi)
 
   const chatId = msg.chat.id;
+  const isFromAdmin = ADMIN_CHAT_ID && String(chatId) === String(ADMIN_CHAT_ID);
 
-  // Foydalanuvchiga tasdiq
+  // Holat 1: Admin, forward qilingan fikr xabariga "Reply" qilib javob yozdi
+  if (isFromAdmin && msg.reply_to_message && msg.reply_to_message.text) {
+    const match = msg.reply_to_message.text.match(/chatId:\s*(-?\d+)/);
+    if (match) {
+      const targetChatId = match[1];
+      bot.sendMessage(targetChatId, `💬 Admin javobi:\n\n${text}`)
+        .then(() => bot.sendMessage(ADMIN_CHAT_ID, '✅ Javobingiz yuborildi.'))
+        .catch((e) => bot.sendMessage(ADMIN_CHAT_ID, '❌ Yuborishda xato: ' + e.message));
+      return;
+    }
+  }
+
+  // Holat 2: Adminning o'z sinov xabarlari — fikr sifatida hisoblanmaydi
+  if (isFromAdmin) return;
+
+  // Holat 3: Oddiy foydalanuvchidan kelgan fikr — adminga uzatiladi
   bot.sendMessage(chatId, "Rahmat! Fikringiz yetkazildi 🙏");
 
-  // Adminga uzatish
   if (ADMIN_CHAT_ID) {
     const from = msg.from;
     const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ');
     const usernamePart = from.username ? ` (@${from.username})` : '';
     bot.sendMessage(
       ADMIN_CHAT_ID,
-      `📩 Yangi fikr/xabar\n👤 ${fullName}${usernamePart}\n🆔 chatId: ${chatId}\n\n${text}`
+      `📩 Yangi fikr/xabar\n👤 ${fullName}${usernamePart}\n🆔 chatId: ${chatId}\n\n${text}\n\n↩️ Javob berish uchun shu xabarga "Reply" qiling.`
     ).catch((e) => console.error('Adminga yuborishda xato:', e.message));
   } else {
     console.log('ADMIN_CHAT_ID sozlanmagan — fikr faqat logga yozildi:', chatId, text);
@@ -268,10 +284,12 @@ app.post('/broadcast', async (req, res) => {
       sent++;
     } catch (e) {
       failed++;
+      // Agar foydalanuvchi botni bloklagan bo'lsa, ro'yxatdan o'chiramiz
       if (e.response && (e.response.statusCode === 403)) {
         delete users[chatId];
       }
     }
+    // Telegram tezlik cheklovidan qochish uchun kichik pauza
     await new Promise((r) => setTimeout(r, 40));
   }
   saveUsers(users);
