@@ -16,6 +16,8 @@ const TIMEZONE = 'Asia/Tashkent';
 const USERS_FILE = path.join(__dirname, 'users.json');
 const REMINDER_FILE = path.join(__dirname, 'reminder.json');
 const CHECKINS_FILE = path.join(__dirname, 'checkins.json');
+const POLLS_FILE = path.join(__dirname, 'polls.json');
+const POLL_INDEX_FILE = path.join(__dirname, 'poll_index.json'); // telegramPollId -> campaignId
 
 if (!BOT_TOKEN) {
   console.error('XATO: BOT_TOKEN muhit o\'zgaruvchisi topilmadi. Render sozlamalarida qo\'shing.');
@@ -98,10 +100,48 @@ function todayInTashkent() {
   return new Date().toLocaleDateString('sv-SE', { timeZone: TIMEZONE }); // YYYY-MM-DD
 }
 
+// ---------- So'rovnoma natijalarini saqlash ----------
+function loadJson(file, fallback) {
+  try {
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    console.error(`${file} o'qishda xato:`, e);
+  }
+  return fallback;
+}
+function saveJson(file, data) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error(`${file} saqlashda xato:`, e);
+  }
+}
+
+let polls = loadJson(POLLS_FILE, {});       // { campaignId: { question, options, createdAt, sentTo: [chatId], answers: { chatId: [optionIndex,...] } } }
+let pollIndex = loadJson(POLL_INDEX_FILE, {}); // { telegramPollId: campaignId }
+
+function saveAll() {
+  saveJson(POLLS_FILE, polls);
+  saveJson(POLL_INDEX_FILE, pollIndex);
+}
+
 // ---------- Bot (polling rejimida) ----------
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 bot.on('polling_error', (err) => console.error('Polling xatosi:', err.message));
+
+// Foydalanuvchi so'rovnomaga ovoz berganda (faqat is_anonymous:false so'rovnomalar uchun keladi)
+bot.on('poll_answer', (pa) => {
+  const campaignId = pollIndex[pa.poll_id];
+  if (!campaignId || !polls[campaignId]) return;
+  polls[campaignId].answers[String(pa.user.id)] = {
+    optionIds: pa.option_ids,
+    name: [pa.user.first_name, pa.user.last_name].filter(Boolean).join(' '),
+    username: pa.user.username || null,
+    answeredAt: new Date().toISOString(),
+  };
+  saveAll();
+});
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
@@ -230,7 +270,16 @@ async function sendContent(chatId, payload) {
     if (!payload.question || options.length < 2) {
       throw new Error('So\'rovnoma uchun savol va kamida 2 ta variant kerak');
     }
-    return bot.sendPoll(chatId, payload.question, options, { is_anonymous: true });
+    const campaignId = payload.campaignId;
+    const sentMsg = await bot.sendPoll(chatId, payload.question, options, { is_anonymous: false });
+    if (campaignId && sentMsg.poll) {
+      pollIndex[sentMsg.poll.id] = campaignId;
+      if (polls[campaignId]) {
+        polls[campaignId].sentTo.push(String(chatId));
+      }
+      saveAll();
+    }
+    return sentMsg;
   }
 
   // default: text
@@ -238,9 +287,24 @@ async function sendContent(chatId, payload) {
   return bot.sendMessage(chatId, payload.message, kb);
 }
 
+// So'rovnoma bo'lsa, kampaniya yozuvini oldindan yaratib qo'yish
+function preparePollCampaign(payload) {
+  if (payload.type !== 'poll') return payload;
+  const campaignId = 'poll_' + Date.now();
+  polls[campaignId] = {
+    question: payload.question,
+    options: payload.options,
+    createdAt: new Date().toISOString(),
+    sentTo: [],
+    answers: {},
+  };
+  saveAll();
+  return { ...payload, campaignId };
+}
+
 // Bitta foydalanuvchiga xabar: POST /send  { "secret": "...", "chatId": "...", ...payload }
 app.post('/send', async (req, res) => {
-  const { secret, chatId, ...payload } = req.body || {};
+  const { secret, chatId, ...rawPayload } = req.body || {};
   if (secret !== ADMIN_SECRET) {
     return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
   }
@@ -248,8 +312,9 @@ app.post('/send', async (req, res) => {
     return res.status(400).json({ error: '"chatId" maydoni kerak' });
   }
   try {
+    const payload = preparePollCampaign(rawPayload);
     await sendContent(chatId, payload);
-    res.json({ ok: true });
+    res.json({ ok: true, campaignId: payload.campaignId || null });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Yuborishda xato' });
   }
@@ -291,11 +356,12 @@ app.post('/reminder-settings', (req, res) => {
 
 // E'lon yuborish: POST /broadcast  { "secret": "...", ...payload }
 app.post('/broadcast', async (req, res) => {
-  const { secret, ...payload } = req.body || {};
+  const { secret, ...rawPayload } = req.body || {};
   if (secret !== ADMIN_SECRET) {
     return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
   }
 
+  const payload = preparePollCampaign(rawPayload);
   const chatIds = Object.keys(users);
   let sent = 0;
   let failed = 0;
@@ -316,7 +382,45 @@ app.post('/broadcast', async (req, res) => {
   }
   saveUsers(users);
 
-  res.json({ total: chatIds.length, sent, failed });
+  res.json({ total: chatIds.length, sent, failed, campaignId: payload.campaignId || null });
+});
+
+// So'rovnomalar ro'yxati: GET /polls?secret=...
+app.get('/polls', (req, res) => {
+  const { secret } = req.query;
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  const list = Object.entries(polls)
+    .map(([id, p]) => ({ id, question: p.question, createdAt: p.createdAt, sentCount: p.sentTo.length, answeredCount: Object.keys(p.answers).length }))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  res.json({ polls: list });
+});
+
+// Bitta so'rovnoma natijasi: GET /poll-results?secret=...&campaignId=...
+app.get('/poll-results', (req, res) => {
+  const { secret, campaignId } = req.query;
+  if (secret !== ADMIN_SECRET) {
+    return res.status(401).json({ error: 'Ruxsat yo\'q — secret noto\'g\'ri' });
+  }
+  const p = polls[campaignId];
+  if (!p) {
+    return res.status(404).json({ error: 'Bunday so\'rovnoma topilmadi' });
+  }
+  const tally = p.options.map(() => 0);
+  const voters = [];
+  for (const [userId, ans] of Object.entries(p.answers)) {
+    ans.optionIds.forEach((i) => { if (tally[i] !== undefined) tally[i]++; });
+    voters.push({ userId, name: ans.name, username: ans.username, optionIds: ans.optionIds });
+  }
+  res.json({
+    question: p.question,
+    options: p.options,
+    tally,
+    sentCount: p.sentTo.length,
+    answeredCount: voters.length,
+    voters,
+  });
 });
 
 // ---------- Kunlik eslatma yuborish logikasi (cron va qo'lda test uchun umumiy) ----------
