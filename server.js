@@ -11,7 +11,7 @@ const MINI_APP_URL = process.env.MINI_APP_URL || 'https://kitobxonn.netlify.app/
 const PORT = process.env.PORT || 3000;
 const REMINDER_HOUR = parseInt(process.env.REMINDER_HOUR || '20', 10); // 24 soatlik format, Toshkent vaqti
 const REMINDER_ENABLED = process.env.REMINDER_ENABLED !== 'false';
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || null;
+const ADMIN_CHAT_ID = (process.env.ADMIN_CHAT_ID || '').trim() || null;
 const TIMEZONE = 'Asia/Tashkent';
 const USERS_FILE = path.join(__dirname, 'users.json');
 const REMINDER_FILE = path.join(__dirname, 'reminder.json');
@@ -209,7 +209,7 @@ bot.on('message', (msg) => {
     bot.sendMessage(
       ADMIN_CHAT_ID,
       `📩 Yangi fikr/xabar\n👤 ${fullName}${usernamePart}\n🆔 chatId: ${chatId}\n\n${text}\n\n↩️ Javob berish uchun shu xabarga "Reply" qiling.`
-    ).catch((e) => console.error('Adminga yuborishda xato:', e.message));
+    ).catch((e) => console.error('❌ Adminga yuborishda xato (ADMIN_CHAT_ID:', ADMIN_CHAT_ID, '):', e.message));
   } else {
     console.log('ADMIN_CHAT_ID sozlanmagan — fikr faqat logga yozildi:', chatId, text);
   }
@@ -463,6 +463,7 @@ app.post('/trigger-reminder', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Kitobxon bot serveri ${PORT}-portda ishga tushdi.`);
+  console.log(ADMIN_CHAT_ID ? `ADMIN_CHAT_ID sozlangan: ${ADMIN_CHAT_ID}` : 'DIQQAT: ADMIN_CHAT_ID sozlanmagan — fikrlar adminga yuborilmaydi.');
 });
 
 // ---------- Avtomatik kunlik eslatma ----------
